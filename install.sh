@@ -9,6 +9,7 @@ import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)
 PYCHK
 if [ ! -f "${BUDGETMAIL_HOME:-$HOME/.budgetmail}/config.json" ]; then
   "$PY" budgetmail.py setup
+  echo; "$PY" budgetmail.py restore --from-mail || true      # a previous machine's backup, if one was ever emailed
   echo; echo "first pull of your whole mailbox (a few minutes)…"; "$PY" budgetmail.py sync --full
 fi
 echo

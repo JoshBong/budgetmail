@@ -5,7 +5,9 @@
   python3 budgetmail.py sync        pull mail now (--full = whole mailbox)
   python3 budgetmail.py import <files…>   backfill from bank CSV exports or statement PDFs (account auto-detected; --account to force)
   python3 budgetmail.py backup [path]     zip of ledger + rules + config (no password) → move to another machine
+  python3 budgetmail.py backup --mail     email that zip to yourself (the service also does this weekly)
   python3 budgetmail.py restore <zip>     replace this machine's ledger with a backup (keeps this machine's Gmail login)
+  python3 budgetmail.py restore --from-mail   same, from the newest backup email in your Gmail
   python3 budgetmail.py serve       run forever: sync every N minutes + dashboard on :PORT
   python3 budgetmail.py install     register `serve` as a system service (systemd / launchd) and start it
   python3 budgetmail.py uninstall
@@ -26,6 +28,7 @@ import os
 import plistlib
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -256,6 +259,34 @@ def restore_backup(data: bytes, con=None) -> dict:
     return {"restored": True, "transactions": n, "con": new}
 
 
+def mail_backup(con, cfg: dict) -> str:
+    """Email a backup to yourself; remember when, so the serve loop can space them out."""
+    con.execute("PRAGMA wal_checkpoint(FULL)")                              # the zip reads the .db file, not the connection
+    n = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    subject = mail.send_backup(cfg["gmail_user"], cfg["gmail_app_password"], make_backup(), n)
+    ledger.set_meta(con, "last_mail_backup", datetime.now().isoformat(timespec="seconds"))
+    return subject
+
+
+def restore_from_mail(cfg: dict, yes: bool = False) -> dict | None:
+    """Newest backup email → replace this ledger. Confirms if there is already data here. None when no backup exists."""
+    print("looking for the newest backup email…", flush=True)
+    found = mail.latest_backup(cfg["gmail_user"], cfg["gmail_app_password"])
+    if not found:
+        print("no backup email found (send one with: ./budgetmail backup --mail)")
+        return None
+    data, subject = found
+    local = 0
+    if config.DB.exists():
+        local = ledger.connect(str(config.DB)).execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    print(f"found: {subject}")
+    if local and not yes:
+        if input(f"this machine has {local} transactions — replace them? [y/N] ").strip().lower() != "y":
+            print("kept local data")
+            return None
+    return restore_backup(data)
+
+
 # ---------------------------------------------------------------- serve
 class Handler(BaseHTTPRequestHandler):
     con = None
@@ -389,6 +420,13 @@ def serve(cfg: dict):
                     print(datetime.now().strftime("%H:%M"), "sync", c, flush=True)
                 except Exception as ex:
                     print(datetime.now().strftime("%H:%M"), "sync failed:", ex, flush=True)
+                days = int(cfg.get("mail_backup_days", 7))
+                last = ledger.get_meta(con, "last_mail_backup")
+                if days > 0 and (not last or datetime.fromisoformat(last) < datetime.now() - timedelta(days=days)):
+                    try:
+                        print(datetime.now().strftime("%H:%M"), "mailed backup:", mail_backup(con, cfg), flush=True)
+                    except Exception as ex:
+                        print(datetime.now().strftime("%H:%M"), "mail backup failed:", ex, flush=True)
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True).start()
@@ -487,6 +525,39 @@ def _lan_ip() -> str | None:
         return None
 
 
+def _tailscale() -> tuple[str, str, bool] | None:
+    """(ip, magicdns name, running) if the tailscale CLI is installed and running, else None."""
+    exe = shutil.which("tailscale") or ("/Applications/Tailscale.app/Contents/MacOS/Tailscale" if sys.platform == "darwin" else None)
+    if not exe or not Path(exe).exists():
+        return None
+    try:
+        ip = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True, timeout=3).stdout.strip().splitlines()
+        if not ip:
+            return None
+        st = json.loads(subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=3).stdout or "{}")
+        name = (st.get("Self") or {}).get("DNSName", "").rstrip(".")
+        return ip[0], name, st.get("BackendState") == "Running"
+    except Exception:
+        return None
+
+
+def _urls(port: int) -> list[tuple[str, str]]:
+    """Every address the dashboard answers on, as (label, url) — the Tailscale one is what works off-LAN."""
+    host = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip()
+    out = [("this machine", f"http://localhost:{port}"), ("on your LAN", f"http://{host}:{port}")]
+    ip = _lan_ip()
+    if ip and not ip.startswith("100."):
+        out.append(("", f"http://{ip}:{port}"))
+    ts = _tailscale()
+    if ts:
+        out.append(("via Tailscale", f"http://{ts[0]}:{port}" + ("" if ts[2] else "  (tailscale is stopped — start it)")))
+        if ts[1]:
+            out.append(("", f"http://{ts[1]}:{port}"))
+    else:
+        out.append(("via Tailscale", f"install it → http://<tailscale-ip>:{port}"))
+    return out
+
+
 def _announce(port: int, wait: int = 15):
     """Block until the server answers (or `wait` seconds), then print where it lives — or the log tail if it didn't come up."""
     import urllib.request
@@ -494,17 +565,11 @@ def _announce(port: int, wait: int = 15):
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=1) as r:
                 st = json.load(r)
-            host = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip()
-            ip = _lan_ip()
-            ts = ip if ip and ip.startswith("100.") and 64 <= int(ip.split(".")[1]) <= 127 else None   # Tailscale CGNAT range
-            print(f"""
-  ✓ budgetmail is up
-    this machine   http://localhost:{port}
-    on your LAN    http://{host}:{port}""" + (f"\n                   http://{ip}:{port}" if ip and not ts else "")
-                  + (f"\n    via Tailscale  http://{ts}:{port}  (also http://{host.split('.')[0]}:{port} on the tailnet)" if ts else f"\n    via Tailscale  install it → http://<tailscale-name>:{port}") + f"""
-    last sync      {st.get('last_sync') or 'never — first sync starts now'}
-    logs           {config.HOME / 'serve.log' if sys.platform == 'darwin' else 'journalctl -u ' + SERVICE + ' -f'}
-""")
+            print("\n  ✓ budgetmail is up")
+            for label, url in _urls(port):
+                print(f"    {label:<14} {url}")
+            print(f"    {'last sync':<14} {st.get('last_sync') or 'never — first sync starts now'}")
+            print(f"    {'logs':<14} {config.HOME / 'serve.log' if sys.platform == 'darwin' else 'journalctl -u ' + SERVICE + ' -f'}\n")
             return True
         except Exception:
             time.sleep(0.5)
@@ -529,10 +594,11 @@ def status():
     con = ledger.connect(str(config.DB))
     n_tx, n_st = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0], con.execute("SELECT COUNT(*) FROM statements").fetchone()[0]
     accts = [r["name"] for r in con.execute("SELECT name FROM accounts ORDER BY name")]
-    host = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip()
-    print(f"service    {_service_state()}")
-    print(f"dashboard  http://{host}:{cfg['port']}  ({'listening' if _port_open(cfg['port']) else 'port closed'})")
+    print(f"service    {_service_state()}  ({'listening' if _port_open(cfg['port']) else 'port closed'})")
+    for i, (label, url) in enumerate(_urls(cfg["port"])):
+        print(f"{'dashboard' if i == 0 else '':<10} {label:<14} {url}")
     print(f"last sync  {ledger.get_meta(con, 'last_sync') or 'never'}  {ledger.get_meta(con, 'last_counts', '')}")
+    print(f"backup     last emailed {ledger.get_meta(con, 'last_mail_backup') or 'never'} · every {cfg.get('mail_backup_days', 7)} days")
     print(f"ledger     {n_tx} transactions · {n_st} statements · accounts: {', '.join(accts) or 'none'}")
     print(f"interval   every {cfg['sync_interval_min']} min · gmail {cfg['gmail_user']} · config {config.CONFIG}")
 
@@ -654,6 +720,9 @@ if __name__ == "__main__":
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--account", help="account id for import when it can't be detected")
     ap.add_argument("--force", action="store_true", help="import: re-read a file already imported (rows still dedupe)")
+    ap.add_argument("--mail", action="store_true", help="backup: email the zip to yourself instead of writing a file")
+    ap.add_argument("--from-mail", action="store_true", help="restore: from the newest backup email in your Gmail")
+    ap.add_argument("--yes", action="store_true", help="restore --from-mail: don't ask before replacing local data")
     ap.add_argument("rest", nargs="*")
     a = ap.parse_args()
     if a.cmd == "setup":
@@ -680,12 +749,20 @@ if __name__ == "__main__":
     elif a.cmd == "update":
         update()
     elif a.cmd == "backup":
-        out = Path(a.rest[0]) if a.rest else Path(f"budgetmail-backup-{date.today().isoformat()}.zip")
-        out.write_bytes(make_backup()); print(out, f"({out.stat().st_size // 1024} KB)")
+        if a.mail:
+            print("sent:", mail_backup(ledger.connect(str(config.DB)), config.load()))
+        else:
+            out = Path(a.rest[0]) if a.rest else Path(f"budgetmail-backup-{date.today().isoformat()}.zip")
+            out.write_bytes(make_backup()); print(out, f"({out.stat().st_size // 1024} KB)")
     elif a.cmd == "restore":
-        if not a.rest:
-            raise SystemExit("usage: restore <backup.zip>")
-        r = restore_backup(Path(a.rest[0]).read_bytes()); r.pop("con"); print(r, "— restart the service if it is running")
+        if a.from_mail:
+            r = restore_from_mail(config.load(), yes=a.yes)
+        elif a.rest:
+            r = restore_backup(Path(a.rest[0]).read_bytes())
+        else:
+            raise SystemExit("usage: restore <backup.zip>  |  restore --from-mail")
+        if r:
+            r.pop("con"); print(r, "— restart the service if it is running")
     elif a.cmd == "import":
         if not a.rest:
             raise SystemExit("usage: import <file.csv|file.pdf> [...]   (add --account <id> if the account can't be detected)")

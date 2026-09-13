@@ -48,13 +48,16 @@ and prints the URL — `http://<host>:8080`. Then drop your bank's statement PDF
 on the box and your phone/laptop (free) and the same URL works from any network, encrypted — that's the recommended
 "hosting". Any VPN or SSH tunnel works the same way.
 
-**Backups / moving machines:** Data tab → **Download backup** (ledger, budgets, rules, settings — not the Gmail password).
-Drop that zip on another machine's Data tab to restore. Run one server at a time.
+**Backups / moving machines:** the service emails a backup zip to your own Gmail once a week (ledger, budgets, rules,
+settings — never the Gmail password; it's the same data your inbox already holds). A fresh install finds the newest one and
+restores it before the first pull, so moving to a new box is `git clone` + `./install.sh` + your Gmail login. By hand:
+`./budgetmail backup --mail` and `./budgetmail restore --from-mail`. The Data tab's **Download backup** / drop-to-restore
+still work for a file on disk. Run one server at a time.
 
 ## Commands
 ```
 ./install.sh                      first install: setup wizard → first pull → register the service
-./budgetmail status              service state · last sync · ledger totals · URL
+./budgetmail status              service state · LAN + Tailscale URLs · last sync · last backup · ledger totals
 ./budgetmail stop | start        pause / resume the service (stays installed)
 ./budgetmail update              git pull → run tests → restart
 ./budgetmail doctor              check python · config · Gmail login · database · service · port
@@ -63,7 +66,8 @@ Drop that zip on another machine's Data tab to restore. Run one server at a time
 ./budgetmail config gmail        re-enter the Gmail login (tested before saving)
 ./budgetmail sync [--full]       pull mail now from the terminal (--full = whole mailbox)
 ./budgetmail import <files…>     backfill from statement PDFs / CSV exports (account auto-detected)
-./budgetmail backup | restore <zip>   move everything to another machine (Data tab has a download button too)
+./budgetmail backup [--mail]     zip of everything (no password) to a file, or emailed to yourself
+./budgetmail restore <zip> | --from-mail   replace this machine's data from a zip, or the newest backup email
 ./budgetmail serve               run in the foreground (what the service runs)
 ./budgetmail install | uninstall register / remove the service (systemd on Linux, launchd on macOS)
 ```
