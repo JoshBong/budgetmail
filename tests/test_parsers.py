@@ -298,6 +298,10 @@ class VenmoTests(unittest.TestCase):
         p = parse("Sam Walton paid you $16.00", self.V, "Sam Walton paid you $ 16. 00 Mc’ds See transaction ## Money credited to your Venmo account. ## Transaction details### Date Aug 05, 2026")
         self.assertEqual((p.kind, p.amount, p.merchant, p.txn_type), ("zelle_in", 16.0, "Venmo from Sam Walton", "zelle"))
 
+    def test_transaction_id_is_the_ref(self):
+        p = parse("Sebastian Losada paid you $24.00", self.V, "Sebastian Losada paid you $ 24. 00 Harvard club See transaction ## Money credited to your Venmo account. ## Transaction details### Date Sep 12, 2026### Transaction ID 4684858923517245451### Sent to @Jhuang314")
+        self.assertEqual((p.kind, p.amount, p.merchant, p.extra["ref"]), ("zelle_in", 24.0, "Venmo from Sebastian Losada", "4684858923517245451"))
+
     def test_received_long_subject(self):
         p = parse("Jovian Wang paid $16.00 to your Venmo account. Leave it in Venmo or transfer it to your bank account.", self.V, "Jovian wang paid you $ 16. 00 Borger See transaction Date Aug 29, 2026")
         self.assertEqual((p.kind, p.merchant), ("zelle_in", "Venmo from Jovian Wang"))

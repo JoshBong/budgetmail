@@ -1,12 +1,14 @@
 import { el } from '../lib/dom.js';
-import { store, sumBy, api } from '../lib/store.js';
+import { store, sumBy, api, matches } from '../lib/store.js';
 import { money0, monthLabel, ym, today } from '../lib/format.js';
 import { MonthNav } from '../components/monthNav.js';
 import { Segmented } from '../components/segmented.js';
 import { Donut } from '../components/donut.js';
 import { CategoryCards } from '../components/categoryCards.js';
 import { TxList } from '../components/txList.js';
+import { SyncButton } from '../components/syncButton.js';
 import { recatOptions } from '../lib/recat.js';
+import { txActions } from '../lib/txActions.js';
 
 const MAX_SLICES = 8;
 
@@ -41,21 +43,26 @@ export function SpendingView({ rerender, goto }) {
   };
 
   const expanded = store.state.expanded;
-  const toggle = k => { store.state.expanded = expanded === k ? null : k; rerender(); };
-  const detailRows = expanded ? rows.filter(t => key(t) === expanded) : [];
-  const detail = expanded && detailRows.length ? el('section', { class: 'panel detail', style: { '--c': store.colorFor(mode, expanded) } },
+  const toggle = k => { store.state.expanded = expanded === k ? null : k; store.state.detailQ = ''; rerender(); };
+  const dq = store.state.detailQ;
+  const catRows = expanded ? rows.filter(t => key(t) === expanded) : [];
+  const detailRows = catRows.filter(t => matches(t, dq));
+  const detail = expanded && catRows.length ? el('section', { class: 'panel detail', style: { '--c': store.colorFor(mode, expanded) } },
     el('div', { class: 'row', style: { marginBottom: '8px' } },
-      el('h3', { style: { margin: 0 } }, el('i', { class: 'dot' }), ' ', expanded, el('span', { class: 'muted' }, ` · ${detailRows.length} in ${monthLabel(month)}`)),
+      el('h3', { style: { margin: 0 } }, el('i', { class: 'dot' }), ' ', expanded, el('span', { class: 'muted' }, ` · ${dq ? detailRows.length + ' of ' : ''}${catRows.length} in ${monthLabel(month)}`)),
       el('span', { class: 'grow' }),
       el('a', { href: '#transactions', class: 'muted', onclick: e => { e.preventDefault(); store.state.filter = { q: '', month, account: mode === 'cat' ? '' : expanded, category: mode === 'cat' ? expanded : '' }; goto('transactions'); } }, 'open in Transactions ›'),
       el('button', { class: 'muted', style: { padding: '2px 8px' }, onclick: () => toggle(expanded), 'aria-label': 'close' }, '✕')),
-    TxList({ rows: detailRows, colorFor: c => store.categoryColor(c), limit: 60, drag })) : null;
+    el('input', { class: 'detail-search', type: 'search', placeholder: 'search merchant…', value: dq, 'aria-label': 'search ' + expanded,
+      oninput: e => { store.state.detailQ = e.target.value.toLowerCase(); rerender({ keepFocus: true }); } }),
+    TxList({ rows: detailRows, colorFor: c => store.categoryColor(c), limit: dq ? 400 : 60, drag, onTap: txActions(rerender) })) : null;
   const isCurrent = month === ym(today());
   const spentLine = 'spent in ' + monthLabel(month);
   return el('div', {},
-    MonthNav({ months: store.months, month, onChange: m => { store.state.month = m; rerender(); } }),
+    MonthNav({ months: store.months, month, onChange: m => { store.state.month = m; store.state.expanded = null; store.state.detailQ = ''; rerender(); } }),
     el('div', { class: 'row', style: { justifyContent: 'center', marginBottom: '6px' } },
-      Segmented({ options: [{ value: 'cat', label: 'by category' }, { value: 'acct', label: 'by account' }], value: mode, onChange: v => { store.state.mode = v; rerender(); } })),
+      Segmented({ options: [{ value: 'cat', label: 'by category' }, { value: 'acct', label: 'by account' }], value: mode, onChange: v => { store.state.mode = v; rerender(); } }),
+      SyncButton({ compact: true, onDone: () => store.load().then(() => rerender()) })),
     Donut({ items: shaped.filter(i => i.value > 0), total, onSelect: toggle, selected: expanded,
       title: net < 0 ? '+' + money0(-net) : money0(net), titleClass: net < 0 ? 'down' : '',
       subtitle: monthLabel(month) }),

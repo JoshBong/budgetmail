@@ -12,7 +12,7 @@ export const store = {
   spend: [],            // rows that count as spending (purchases, refunds, zelle out) — excludes transfers/ignored
   months: [],           // continuous 'YYYY-MM' list, newest first
   accountColor: {},
-  state: { tab: 'spending', month: ym(today()), mode: 'cat', expanded: null, editing: null, trend: 'total', filter: { q: '', month: '', account: '', category: '' } },
+  state: { tab: 'spending', month: ym(today()), mode: 'cat', expanded: null, detailQ: '', editing: null, trend: 'total', filter: { q: '', month: '', account: '', category: '' } },
 
   async load() {
     const r = await fetch('/api/data');
@@ -52,6 +52,9 @@ export const store = {
   inMonth(m) { return this.spend.filter(t => ym(t.date) === m); },
   prevMonth(m) { const i = this.months.indexOf(m); return i >= 0 ? this.months[i + 1] : undefined; },
 };
+
+// Search box match: the name you see, the bank's original text, or the category.
+export const matches = (t, q) => !q || (t.merchant + ' ' + t.orig + ' ' + t.cat).toLowerCase().includes(q);
 
 // Sum of spend (positive = money out) grouped by key.
 export function sumBy(rows, key) {

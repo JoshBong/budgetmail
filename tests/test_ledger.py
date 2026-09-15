@@ -36,6 +36,71 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(ledger.record(self.con, "Chase", p, "subj"), "statement")
 
 
+def venmo_in(who, amount=24.0, day=D, ref=None):
+    return Parsed(kind="zelle_in", amount=amount, merchant="Venmo from " + who, date=day, posted=True, extra={"ref": ref} if ref else {})
+
+
+class VenmoIdentityTests(unittest.TestCase):
+    """Sep 2026: Sebastian's $24 (Sep 12) vanished because Aidan's posted $24 (Sep 9) sat within the ±3-day twin window."""
+
+    def setUp(self):
+        self.con = ledger.connect(":memory:")
+
+    def count(self):
+        return self.con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+
+    def test_same_amount_three_days_apart_are_two_payments(self):
+        from datetime import timedelta
+        self.assertEqual(ledger.record(self.con, "Venmo", venmo_in("Aidan Cuccaro"), "s"), "txn_new")
+        self.assertEqual(ledger.record(self.con, "Venmo", venmo_in("Sebastian Losada", day=D + timedelta(days=3)), "s"), "txn_new")
+        self.assertEqual(self.count(), 2)
+
+    def test_ref_tells_apart_same_person_same_amount_same_day(self):
+        self.assertEqual(ledger.record(self.con, "Venmo", venmo_in("Sam Walton", ref="111111"), "s"), "txn_new")
+        self.assertEqual(ledger.record(self.con, "Venmo", venmo_in("Sam Walton", ref="222222"), "s"), "txn_new")
+        self.assertEqual(ledger.record(self.con, "Venmo", venmo_in("Sam Walton", ref="111111"), "s"), "txn")
+        self.assertEqual(self.count(), 2)
+
+    def test_row_recorded_before_refs_is_not_doubled(self):
+        ledger.record(self.con, "Venmo", venmo_in("Jovian Wang"), "s")                 # old sync: no ref
+        self.assertEqual(ledger.record(self.con, "Venmo", venmo_in("Jovian Wang", ref="333333"), "s"), "txn")
+        self.assertEqual(self.count(), 1)
+
+
+class RenameDupeTests(unittest.TestCase):
+    def setUp(self):
+        self.con = ledger.connect(":memory:")
+        ledger.record(self.con, "Chase", purchase(), "s")
+        ledger.record(self.con, "Chase", purchase(amount=12.0), "s")
+        self.ids = [r["id"] for r in self.con.execute("SELECT id FROM transactions ORDER BY amount")]
+
+    def tx(self):
+        import dashboard
+        import report
+        return {t["id"]: t for t in dashboard.collect(self.con, report.Classifier(self.con))[0]}
+
+    def test_rename_one_is_display_only(self):
+        budgetmail.rename(self.con, self.ids[0], "Ramen Ishida", "one")
+        t = self.tx()
+        self.assertEqual((t[self.ids[0]]["merchant"], t[self.ids[0]]["orig"], t[self.ids[0]]["renamed"]), ("Ramen Ishida", "SQ *RAMEN ISHIDA", "one"))
+        self.assertEqual(t[self.ids[1]]["merchant"], "SQ *RAMEN ISHIDA")
+        self.assertEqual(t[self.ids[0]]["mkey"], t[self.ids[1]]["mkey"])           # categorization still keys on the bank text
+
+    def test_rename_merchant_then_undo(self):
+        budgetmail.rename(self.con, self.ids[0], "Solo", "one")
+        r = budgetmail.rename(self.con, self.ids[1], "Ramen Ishida", "merchant")
+        self.assertEqual({t["merchant"] for t in self.tx().values()}, {"Ramen Ishida"})
+        budgetmail.revert_rename(self.con, r["revert"])
+        self.assertEqual(self.tx()[self.ids[0]]["merchant"], "Solo")
+        self.assertEqual(self.tx()[self.ids[1]]["merchant"], "SQ *RAMEN ISHIDA")
+
+    def test_dupe_is_ignored_and_reversible(self):
+        ledger.set_dupe(self.con, self.ids[0], True)
+        self.assertEqual((self.tx()[self.ids[0]]["dupe"], self.tx()[self.ids[0]]["ignore"]), (True, True))
+        ledger.set_dupe(self.con, self.ids[0], False)
+        self.assertFalse(self.tx()[self.ids[0]]["dupe"])
+
+
 class PublishTests(unittest.TestCase):
     def test_publish_reaches_subscriber_and_noops_without(self):
         budgetmail.publish({"new_txns": 1})               # no subscribers: must not raise

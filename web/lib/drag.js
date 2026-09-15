@@ -4,6 +4,7 @@
 const HOLD_MS = 320, SLOP = 6;
 
 let session = null;   // { item, ghost, source, target, dx, dy, opts }
+let lastEnd = 0;      // a drag's pointerup can still land a click on the row: taps check justDragged()
 
 const swallow = e => e.preventDefault();   // while dragging with a finger, the page must not scroll under it
 
@@ -54,6 +55,7 @@ function end(drop) {
   document.body.classList.remove('drag-active');
   document.removeEventListener('touchmove', swallow);
   session = null;
+  lastEnd = Date.now();
   opts.onEnd?.();
   if (drop && target) opts.onDrop(item, target.dataset.dropCat, target);
 }
@@ -93,3 +95,4 @@ export function makeDraggable(node, item, opts) {
 }
 
 export const dragging = () => !!session;
+export const justDragged = () => !!session || Date.now() - lastEnd < 400;

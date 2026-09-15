@@ -23,13 +23,18 @@ class Venmo(BankParser):
         amt = self.amount(e.subject) or self._spaced_amount(e.body)
         if amt is None:
             return None
-        return Parsed("zelle_out", amt, "Venmo to " + who, None, self.date(e.body, e.received, "Date"), posted=True, extra={"note": self._note(e.body, who)})   # Venmo emails are final
+        return Parsed("zelle_out", amt, "Venmo to " + who, None, self.date(e.body, e.received, "Date"), posted=True, extra={"note": self._note(e.body, who), "ref": self._ref(e.body)})   # Venmo emails are final
 
     def received(self, e: Email):
         m = re.match(r"(.+?) paid (?:your? )?\$", e.subject) or re.match(r"You received \$[\d.,]+ from (.+)$", e.subject)
         who = (m.group(1) if m else "?").strip()
         amt = self.amount(e.subject) or self._spaced_amount(e.body)
-        return Parsed("zelle_in", amt, "Venmo from " + who, None, self.date(e.body, e.received, "Date"), posted=True) if amt else None
+        return Parsed("zelle_in", amt, "Venmo from " + who, None, self.date(e.body, e.received, "Date"), posted=True, extra={"ref": self._ref(e.body)}) if amt else None
+
+    @staticmethod
+    def _ref(body):                  # Venmo's own transaction id: the exact identity of a payment
+        m = re.search(r"Transaction ID\s*:?\s*(\d{6,})", body)
+        return m.group(1) if m else None
 
     @staticmethod
     def _spaced_amount(text):        # bodies render "$ 5. 00"

@@ -14,11 +14,17 @@ def short(inst):
 
 def collect(con, cl):
     tx = []
+    by_row, by_merch = ledger.names(con)
+    dup = ledger.dupes(con)
     for r in con.execute("SELECT t.*, a.institution, a.last_four FROM transactions t JOIN accounts a ON a.id=t.account_id ORDER BY t.date DESC, t.id"):
         cat, ignore, pinned = cl.of(r)
+        mkey = report.merchant_key(r)
+        renamed = "one" if r["id"] in by_row else "merchant" if mkey in by_merch else None
+        is_dupe = r["id"] in dup
         tx.append({"id": r["id"], "date": r["date"], "acct": r["account_id"], "card": ledger.account_label(r["institution"], r["last_four"]),
-                   "merchant": r["description"], "amount": round(r["amount"], 2), "cat": cat, "type": r["type"],
-                   "ignore": ignore, "status": r["status"], "mkey": report.merchant_key(r), "pinned": pinned})
+                   "merchant": by_row.get(r["id"]) or by_merch.get(mkey) or r["description"], "orig": r["description"], "renamed": renamed,
+                   "amount": round(r["amount"], 2), "cat": cat, "type": r["type"], "ignore": ignore or is_dupe, "dupe": is_dupe,
+                   "status": r["status"], "mkey": mkey, "pinned": pinned})
     accounts = [{"id": r["id"], "name": r["name"]} for r in con.execute("SELECT id, name FROM accounts ORDER BY name")]
     return tx, accounts
 
@@ -46,7 +52,7 @@ def checksum(con):
     for r in rows:
         p = prev.get(r["account_id"]); prev[r["account_id"]] = r
         since = p["statement_date"] if p else (date.fromisoformat(r["statement_date"]) - timedelta(days=31)).isoformat()
-        ours = con.execute("SELECT COALESCE(SUM(-amount),0) FROM transactions WHERE account_id=? AND date>? AND date<=? AND type NOT IN ('transfer')",
+        ours = con.execute("SELECT COALESCE(SUM(-amount),0) FROM transactions WHERE account_id=? AND date>? AND date<=? AND type NOT IN ('transfer') AND id NOT IN (SELECT tx_id FROM dupes)",
                            (r["account_id"], since, r["statement_date"])).fetchone()[0]
         out.append({"card": ledger.account_label(r["institution"], r["last_four"]), "date": r["statement_date"], "bank": r["balance"], "ours": ours, "gap": r["balance"] - ours})
     return sorted(out, key=lambda r: r["date"], reverse=True)

@@ -39,9 +39,12 @@ class Classifier:
         self.rules = load_rules()
         self.over = ledger.overrides(con) if con is not None else {}
         self.merch = ledger.merchant_cats(con) if con is not None else {}
+        self.dupes = ledger.dupes(con) if con is not None else set()
 
     def of(self, row):
         """→ (category, ignore, pinned)"""
+        if row["id"] in self.dupes:                          # you marked it a duplicate: out of every total
+            return categories.normalize(row["category"]), True, False
         manual = self.over.get(row["id"]) or self.merch.get(merchant_key(row))
         if manual:
             return categories.normalize(manual), False, True

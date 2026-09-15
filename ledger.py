@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS budgets (category TEXT PRIMARY KEY, amount REAL NOT N
 CREATE TABLE IF NOT EXISTS imports (sha TEXT PRIMARY KEY, filename TEXT, account_id TEXT, imported_at TEXT, rows INTEGER);
 CREATE TABLE IF NOT EXISTS overrides (tx_id TEXT PRIMARY KEY, category TEXT NOT NULL, created_at TEXT);
 CREATE TABLE IF NOT EXISTS merchant_cats (merchant TEXT PRIMARY KEY, category TEXT NOT NULL, created_at TEXT);
+CREATE TABLE IF NOT EXISTS renames (tx_id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT);
+CREATE TABLE IF NOT EXISTS merchant_names (merchant TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT);
+CREATE TABLE IF NOT EXISTS dupes (tx_id TEXT PRIMARY KEY, created_at TEXT);
 CREATE INDEX IF NOT EXISTS tx_date ON transactions(date);
 """
 
@@ -88,17 +91,24 @@ def record(con, bank: str, p: Parsed, subject: str) -> str:
         return "statement"
     d = p.date.isoformat()
     amt = p.signed_amount
-    if con.execute("""SELECT 1 FROM transactions WHERE account_id=? AND status='posted' AND ABS(amount-?)<0.005
+    if con.execute("""SELECT 1 FROM transactions WHERE account_id=? AND status='posted' AND id NOT LIKE 'mail\\_%' ESCAPE '\\' AND ABS(amount-?)<0.005
                       AND ABS(julianday(date)-julianday(?))<=3 LIMIT 1""", (aid, amt, d)).fetchone():
         return "txn"                                   # the bank's posted row is already here (CSV/PDF); the alert adds nothing
+    # Only a bank-posted row shadows an alert, never another email. Two emails with the same amount a few days apart are two payments
+    # (friends splitting a bill); a real duplicate gets marked by hand, which beats silently losing money.
     key = f"{bank}|{p.last4}|{d}|{amt:.2f}|{p.merchant.lower()}"
     tid = "mail_" + hashlib.sha1(key.encode()).hexdigest()[:20]
+    ref = p.extra.get("ref")                           # the sender's own transaction id (Venmo), when the email has one
+    if ref:
+        legacy = con.execute("SELECT raw FROM transactions WHERE id=?", (tid,)).fetchone()
+        if not legacy or json.loads(legacy["raw"] or "{}").get("ref"):   # rows recorded before refs keep their old id
+            tid = "mail_" + hashlib.sha1(f"{bank}|ref|{ref}".encode()).hexdigest()[:20]
     new = con.execute("SELECT 1 FROM transactions WHERE id=?", (tid,)).fetchone() is None
     today = date.today().isoformat()
     con.execute("""INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen""",
                 (tid, aid, d, p.merchant, amt, "posted" if p.posted else "pending", p.txn_type, None, p.merchant,
-                 json.dumps({"subject": subject, "kind": p.kind}), today, today))
+                 json.dumps({"subject": subject, "kind": p.kind, "ref": ref} if ref else {"subject": subject, "kind": p.kind}), today, today))
     return "txn_new" if new else "txn"
 
 
@@ -148,6 +158,42 @@ def set_merchant_cat(con, merchant: str, category: str | None):
     else:
         con.execute("INSERT INTO merchant_cats VALUES (?,?,?) ON CONFLICT(merchant) DO UPDATE SET category=excluded.category",
                     (merchant, category, date.today().isoformat()))
+    con.commit()
+
+
+def names(con) -> tuple[dict, dict]:
+    """(tx id → name, merchant_key → name): display names you gave a row or a whole merchant. Display only —
+    categories keep matching the bank's own text, so renaming never moves money between categories."""
+    return ({r["tx_id"]: r["name"] for r in con.execute("SELECT tx_id, name FROM renames")},
+            {r["merchant"]: r["name"] for r in con.execute("SELECT merchant, name FROM merchant_names")})
+
+
+def set_name(con, tx_id: str, name: str | None):
+    if not name:
+        con.execute("DELETE FROM renames WHERE tx_id=?", (tx_id,))
+    else:
+        con.execute("INSERT INTO renames VALUES (?,?,?) ON CONFLICT(tx_id) DO UPDATE SET name=excluded.name", (tx_id, name, date.today().isoformat()))
+    con.commit()
+
+
+def set_merchant_name(con, merchant: str, name: str | None):
+    if not name:
+        con.execute("DELETE FROM merchant_names WHERE merchant=?", (merchant,))
+    else:
+        con.execute("INSERT INTO merchant_names VALUES (?,?,?) ON CONFLICT(merchant) DO UPDATE SET name=excluded.name", (merchant, name, date.today().isoformat()))
+    con.commit()
+
+
+def dupes(con) -> set:
+    """tx ids you marked as a duplicate: kept in the ledger, left out of every total."""
+    return {r["tx_id"] for r in con.execute("SELECT tx_id FROM dupes")}
+
+
+def set_dupe(con, tx_id: str, on: bool):
+    if on:
+        con.execute("INSERT OR IGNORE INTO dupes VALUES (?,?)", (tx_id, date.today().isoformat()))
+    else:
+        con.execute("DELETE FROM dupes WHERE tx_id=?", (tx_id,))
     con.commit()
 
 

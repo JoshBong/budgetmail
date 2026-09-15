@@ -216,6 +216,39 @@ def revert_recategorize(con, r: dict):
     return {"changed": 1}
 
 
+def rename(con, tx_id: str, name: str | None, scope: str) -> dict:
+    """Give a transaction a readable name. scope 'one' → this row; 'merchant' → every row from the same merchant, past
+    and future (per-row names on it are cleared, the merchant name subsumes them). A blank name resets to the bank's text.
+    Returns {changed, revert}; `revert` is the body to POST to /api/rename/revert."""
+    import report
+    row = con.execute("SELECT * FROM transactions WHERE id=?", (tx_id,)).fetchone()
+    if row is None:
+        raise KeyError("no such transaction")
+    name = (name or "").strip()[:80] or None
+    by_row, by_merch = ledger.names(con)
+    if scope == "one":
+        ledger.set_name(con, tx_id, name)
+        return {"changed": 1, "revert": {"scope": "one", "id": tx_id, "name": by_row.get(tx_id)}}
+    key = report.merchant_key(row)
+    ids = [r["id"] for r in con.execute("SELECT * FROM transactions") if report.merchant_key(r) == key]
+    prev_rows = {i: n for i, n in by_row.items() if i in ids}
+    for i in prev_rows:
+        ledger.set_name(con, i, None)
+    ledger.set_merchant_name(con, key, name)
+    return {"changed": len(ids), "revert": {"scope": "merchant", "merchant": key, "name": by_merch.get(key), "rows": prev_rows}}
+
+
+def revert_rename(con, r: dict):
+    """Undo one rename() using the `revert` blob it returned."""
+    if r.get("scope") == "one":
+        ledger.set_name(con, r["id"], r.get("name"))
+        return {"changed": 1}
+    ledger.set_merchant_name(con, r["merchant"], r.get("name"))
+    for i, n in (r.get("rows") or {}).items():
+        ledger.set_name(con, i, n)
+    return {"changed": 1}
+
+
 def make_backup() -> bytes:
     """Zip of everything that is state: ledger.db, rules.toml, config.json minus the Gmail password."""
     import io, zipfile
@@ -396,6 +429,27 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             with self.lock:
                 self._send(json.dumps(revert_recategorize(self.con, body)).encode(), "application/json")
+        elif self.path == "/api/rename":
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if body.get("scope") not in ("one", "merchant"):
+                self._send(json.dumps({"error": "scope must be one|merchant"}).encode(), "application/json", 400); return
+            with self.lock:
+                try:
+                    r = rename(self.con, body.get("id"), body.get("name"), body["scope"])
+                except KeyError as ex:
+                    self._send(json.dumps({"error": ex.args[0]}).encode(), "application/json", 404); return
+            self._send(json.dumps(r).encode(), "application/json")
+        elif self.path == "/api/rename/revert":
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            with self.lock:
+                self._send(json.dumps(revert_rename(self.con, body)).encode(), "application/json")
+        elif self.path == "/api/dupe":
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            with self.lock:
+                if not self.con.execute("SELECT 1 FROM transactions WHERE id=?", (body.get("id"),)).fetchone():
+                    self._send(json.dumps({"error": "no such transaction"}).encode(), "application/json", 404); return
+                ledger.set_dupe(self.con, body["id"], bool(body.get("dupe", True)))
+            self._send(json.dumps({"id": body["id"], "dupe": bool(body.get("dupe", True))}).encode(), "application/json")
         elif self.path == "/api/sync":
             with self.lock:
                 try:
