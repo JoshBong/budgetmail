@@ -3,17 +3,14 @@ import { store, api } from '../lib/store.js';
 import { money } from '../lib/format.js';
 import { Table } from '../components/table.js';
 import { DropZone } from '../components/dropZone.js';
+import { SyncButton } from '../components/syncButton.js';
 
 const panel = (title, ...kids) => el('section', { class: 'panel' }, el('h3', {}, title), ...kids);
 
 export function DataView() {
   const d = store.data, c = d.last_counts || {};
 
-  const syncBtn = el('button', { class: 'primary', onclick: async () => {
-    syncBtn.textContent = 'syncing…'; syncBtn.disabled = true;
-    try { await api('/api/sync', { method: 'POST' }); location.reload(); }
-    catch (e) { syncBtn.textContent = 'failed: ' + e.message; syncBtn.disabled = false; }
-  } }, '⟳ Sync now');
+  const syncBtn = SyncButton({ onDone: () => location.reload() });
 
   const results = el('div', { class: 'import-results' });
   const acctSel = el('select', { 'aria-label': 'account (only if it cannot be detected)' }, option('detect account from file', ''), ...d.accounts.map(a => option(a.name, a.id)));

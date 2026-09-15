@@ -43,7 +43,7 @@ export function BudgetView({ rerender }) {
       setTimeout(() => input.focus(), 0);
       return el('span', { class: 'row', style: { display: 'inline-flex', gap: '4px' } }, input, el('button', { class: 'primary', style: { padding: '3px 10px' }, onclick: () => save('__total__', +input.value) }, 'Save'));
     }
-    return el('button', { class: 'budget-btn', onclick: () => { store.state.editing = '__total__'; rerender(); } }, total ? '✎' : '+ total budget');
+    return el('button', { class: 'budget-btn', onclick: () => { store.state.editing = '__total__'; rerender(); } }, '✎');
   }
   return el('div', {},
     MonthNav({ months: store.months, month, onChange: m => { store.state.month = m; rerender(); } }),
