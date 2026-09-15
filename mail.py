@@ -80,32 +80,41 @@ def send_backup(user: str, app_password: str, data: bytes, n_tx: int) -> str:
     return msg["Subject"]
 
 
-def latest_backup(user: str, app_password: str) -> tuple[bytes, str] | None:
-    """The newest self-sent backup email, as (zip bytes, subject) — or None. Verifies the sha256 from the body."""
-    import hashlib
+def backups(user: str, app_password: str, days: int = 60, limit: int = 30) -> list[tuple[bytes, str]]:
+    """Self-sent backups from the last `days` days (newest `limit`), oldest first, each as (zip bytes, subject).
+    Every machine's backups come back, so merging them all rebuilds history and hand edits wherever they were made.
+    A backup whose attachment is missing or fails its sha256 is skipped; the others still count."""
+    from datetime import timedelta
     M = login(user, app_password)
+    msgs = []
     try:
         if M.select(f'"{MAILBOX}"', readonly=True)[0] != "OK":
             raise RuntimeError(f"cannot open {MAILBOX}")
-        _, data = M.search(None, f'(FROM "{user}" SUBJECT "{BACKUP_SUBJECT}")')
-        ids = data[0].split()
-        if not ids:
-            return None
-        best = None                                                # (Date header, id) — sequence order isn't guaranteed chronological
-        for i in ids[-30:]:
+        since = (date.today() - timedelta(days=days)).strftime("%d-%b-%Y")
+        _, data = M.search(None, f'(FROM "{user}" SUBJECT "{BACKUP_SUBJECT}" SINCE {since})')
+        dated = []
+        for i in data[0].split():                                  # headers first: sequence order isn't guaranteed chronological
             _, d = M.fetch(i, "(BODY.PEEK[HEADER.FIELDS (DATE)])")
             try:
-                dt = email.utils.parsedate_to_datetime(email.message_from_bytes(d[0][1])["Date"])
+                dated.append((email.utils.parsedate_to_datetime(email.message_from_bytes(d[0][1])["Date"]), i))
             except Exception:
                 continue
-            if best is None or dt > best[0]:
-                best = (dt, i)
-        if best is None:
-            return None
-        _, d = M.fetch(best[1], "(RFC822)")
-        msg = email.message_from_bytes(d[0][1])
+        for _, i in sorted(dated)[-limit:]:
+            _, d = M.fetch(i, "(RFC822)")
+            msgs.append(email.message_from_bytes(d[0][1]))
     finally:
         M.logout()
+    out = []
+    for msg in msgs:
+        try:
+            out.append(_backup_zip(msg))
+        except ValueError:
+            continue
+    return out
+
+
+def _backup_zip(msg) -> tuple[bytes, str]:
+    import hashlib
     zip_bytes, body = None, ""
     for p in msg.walk():
         if p.get_content_disposition() == "attachment" and (p.get_filename() or "").endswith(".zip"):
@@ -113,7 +122,7 @@ def latest_backup(user: str, app_password: str) -> tuple[bytes, str] | None:
         elif p.get_content_type() == "text/plain":
             body += (p.get_payload(decode=True) or b"").decode("utf-8", errors="replace")
     if not zip_bytes:
-        raise ValueError("newest backup email has no zip attachment")
+        raise ValueError("backup email has no zip attachment")
     m = re.search(r"sha256 ([0-9a-f]{64})", body)
     if m and m.group(1) != hashlib.sha256(zip_bytes).hexdigest():
         raise ValueError("backup attachment is corrupt (sha256 mismatch)")

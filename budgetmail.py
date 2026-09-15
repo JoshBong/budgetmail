@@ -6,8 +6,8 @@
   python3 budgetmail.py import <files…>   backfill from bank CSV exports or statement PDFs (account auto-detected; --account to force)
   python3 budgetmail.py backup [path]     zip of ledger + rules + config (no password) → move to another machine
   python3 budgetmail.py backup --mail     email that zip to yourself (the service also does this weekly)
-  python3 budgetmail.py restore <zip>     replace this machine's ledger with a backup (keeps this machine's Gmail login)
-  python3 budgetmail.py restore --from-mail   same, from the newest backup email in your Gmail
+  python3 budgetmail.py restore <zip>     merge a backup into this machine's ledger (adds history + newer edits, never deletes)
+  python3 budgetmail.py restore --from-mail   same, merging every recent backup email in your Gmail
   python3 budgetmail.py serve       run forever: sync every N minutes + dashboard on :PORT
   python3 budgetmail.py install     register `serve` as a system service (systemd / launchd) and start it
   python3 budgetmail.py uninstall
@@ -266,58 +266,62 @@ def make_backup() -> bytes:
     return buf.getvalue()
 
 
-def restore_backup(data: bytes, con=None) -> dict:
-    """Replace the ledger (and rules/config, keeping this machine's Gmail login) from a backup zip."""
-    import io, shutil, zipfile
+def restore_backup(data: bytes, con=None, bak: bool = True) -> dict:
+    """Merge a backup zip into this ledger (ledger.merge): nothing local is lost, whichever machine made the backup and
+    however old it is. rules.toml comes along only where this machine has none (or just the example); config only fills
+    keys this machine doesn't have, so its Gmail login and port stay. Returns counts + the connection."""
+    import io, shutil, tempfile, zipfile
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         names = set(z.namelist())
         if "ledger.db" not in names:
             raise ValueError("not a budgetmail backup (no ledger.db inside)")
         config.ensure_home()
-        if con is not None:
-            con.close()
-        if config.DB.exists():
+        con = con or ledger.connect(str(config.DB))
+        con.commit()
+        if bak and config.DB.exists():
             shutil.copy(config.DB, config.DB.with_suffix(".db.bak"))            # one-step undo
-        config.DB.write_bytes(z.read("ledger.db"))
-        if "rules.toml" in names:
-            (HERE / "rules.toml").write_bytes(z.read("rules.toml"))
+        with tempfile.TemporaryDirectory() as tmp:
+            theirs = Path(tmp) / "ledger.db"
+            theirs.write_bytes(z.read("ledger.db"))
+            added = ledger.merge(con, str(theirs))
+        rules, example = HERE / "rules.toml", HERE / "rules.example.toml"
+        if "rules.toml" in names and (not rules.exists() or (example.exists() and rules.read_bytes() == example.read_bytes())):
+            rules.write_bytes(z.read("rules.toml"))
         if "config.json" in names:
-            incoming = json.loads(z.read("config.json"))
             cur = json.loads(config.CONFIG.read_text()) if config.CONFIG.exists() else {}
-            for k in ("gmail_user", "gmail_app_password", "port"):
-                if cur.get(k): incoming[k] = cur[k]                         # this machine's login + port win
-            config.save({**cur, **incoming})
-    new = ledger.connect(str(config.DB))
-    n = new.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-    return {"restored": True, "transactions": n, "con": new}
+            config.save({**json.loads(z.read("config.json")), **cur})
+    n = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    return {"merged": True, "added": added, "total": n, "con": con}
 
 
 def mail_backup(con, cfg: dict) -> str:
     """Email a backup to yourself; remember when, so the serve loop can space them out."""
+    con.commit()
     con.execute("PRAGMA wal_checkpoint(FULL)")                              # the zip reads the .db file, not the connection
     n = con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     subject = mail.send_backup(cfg["gmail_user"], cfg["gmail_app_password"], make_backup(), n)
     ledger.set_meta(con, "last_mail_backup", datetime.now().isoformat(timespec="seconds"))
+    con.commit()                                                            # uncommitted, a restart forgot it and mailed again
     return subject
 
 
 def restore_from_mail(cfg: dict, yes: bool = False) -> dict | None:
-    """Newest backup email → replace this ledger. Confirms if there is already data here. None when no backup exists."""
-    print("looking for the newest backup email…", flush=True)
-    found = mail.latest_backup(cfg["gmail_user"], cfg["gmail_app_password"])
+    """Merge every recent backup email (any machine's), oldest first. Merging only adds, so there's nothing to confirm;
+    `yes` is accepted for old scripts. None when no backup email exists."""
+    print("looking for backup emails…", flush=True)
+    found = mail.backups(cfg["gmail_user"], cfg["gmail_app_password"])
     if not found:
         print("no backup email found (send one with: ./budgetmail backup --mail)")
         return None
-    data, subject = found
-    local = 0
+    con = ledger.connect(str(config.DB))
     if config.DB.exists():
-        local = ledger.connect(str(config.DB)).execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-    print(f"found: {subject}")
-    if local and not yes:
-        if input(f"this machine has {local} transactions — replace them? [y/N] ").strip().lower() != "y":
-            print("kept local data")
-            return None
-    return restore_backup(data)
+        import shutil
+        shutil.copy(config.DB, config.DB.with_suffix(".db.bak"))
+    r = None
+    for data, subject in found:
+        r = restore_backup(data, con, bak=False)
+        print(f"  merged {subject}: +{r['added']['transactions']} transactions ({r['total']} now), {r['added']['edits']} edits applied", flush=True)
+    return r
 
 
 # ---------------------------------------------------------------- serve
@@ -474,7 +478,7 @@ def serve(cfg: dict):
                     print(datetime.now().strftime("%H:%M"), "sync", c, flush=True)
                 except Exception as ex:
                     print(datetime.now().strftime("%H:%M"), "sync failed:", ex, flush=True)
-                days = int(cfg.get("mail_backup_days", 7))
+                days = int(cfg.get("mail_backup_days", 1))
                 last = ledger.get_meta(con, "last_mail_backup")
                 if days > 0 and (not last or datetime.fromisoformat(last) < datetime.now() - timedelta(days=days)):
                     try:
@@ -652,7 +656,7 @@ def status():
     for i, (label, url) in enumerate(_urls(cfg["port"])):
         print(f"{'dashboard' if i == 0 else '':<10} {label:<14} {url}")
     print(f"last sync  {ledger.get_meta(con, 'last_sync') or 'never'}  {ledger.get_meta(con, 'last_counts', '')}")
-    print(f"backup     last emailed {ledger.get_meta(con, 'last_mail_backup') or 'never'} · every {cfg.get('mail_backup_days', 7)} days")
+    print(f"backup     last emailed {ledger.get_meta(con, 'last_mail_backup') or 'never'} · every {cfg.get('mail_backup_days', 1)} days")
     print(f"ledger     {n_tx} transactions · {n_st} statements · accounts: {', '.join(accts) or 'none'}")
     print(f"interval   every {cfg['sync_interval_min']} min · gmail {cfg['gmail_user']} · config {config.CONFIG}")
 
@@ -775,8 +779,8 @@ if __name__ == "__main__":
     ap.add_argument("--account", help="account id for import when it can't be detected")
     ap.add_argument("--force", action="store_true", help="import: re-read a file already imported (rows still dedupe)")
     ap.add_argument("--mail", action="store_true", help="backup: email the zip to yourself instead of writing a file")
-    ap.add_argument("--from-mail", action="store_true", help="restore: from the newest backup email in your Gmail")
-    ap.add_argument("--yes", action="store_true", help="restore --from-mail: don't ask before replacing local data")
+    ap.add_argument("--from-mail", action="store_true", help="restore: merge every recent backup email in your Gmail")
+    ap.add_argument("--yes", action="store_true", help="(no longer needed: restore merges, it never replaces)")
     ap.add_argument("rest", nargs="*")
     a = ap.parse_args()
     if a.cmd == "setup":
@@ -816,7 +820,7 @@ if __name__ == "__main__":
         else:
             raise SystemExit("usage: restore <backup.zip>  |  restore --from-mail")
         if r:
-            r.pop("con"); print(r, "— restart the service if it is running")
+            r.pop("con"); print(r)
     elif a.cmd == "import":
         if not a.rest:
             raise SystemExit("usage: import <file.csv|file.pdf> [...]   (add --account <id> if the account can't be detected)")

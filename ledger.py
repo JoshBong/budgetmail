@@ -2,7 +2,7 @@
 import hashlib
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 
 from parsers import Parsed
 
@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS merchant_cats (merchant TEXT PRIMARY KEY, category TE
 CREATE TABLE IF NOT EXISTS renames (tx_id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT);
 CREATE TABLE IF NOT EXISTS merchant_names (merchant TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT);
 CREATE TABLE IF NOT EXISTS dupes (tx_id TEXT PRIMARY KEY, created_at TEXT);
+CREATE TABLE IF NOT EXISTS cleared (tbl TEXT NOT NULL, key TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (tbl, key));
 CREATE INDEX IF NOT EXISTS tx_date ON transactions(date);
 """
 
@@ -28,7 +29,82 @@ def connect(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(path, check_same_thread=False, timeout=30)   # wait for a concurrent sync instead of "database is locked"
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    for t in EDITS:                                                     # hand edits carry updated_at so backups can merge newest-wins
+        if "updated_at" not in {r[1] for r in con.execute(f"PRAGMA table_info({t})")}:
+            con.execute(f"ALTER TABLE {t} ADD COLUMN updated_at TEXT")
+    con.commit()
     return con
+
+
+# Hand edits: table → (key column, value column; None = the row's existence is the value).
+EDITS = {"overrides": ("tx_id", "category"), "merchant_cats": ("merchant", "category"), "renames": ("tx_id", "name"),
+         "merchant_names": ("merchant", "name"), "dupes": ("tx_id", None), "budgets": ("category", "amount")}
+
+
+def _set_edit(con, table: str, key: str, value, at: str | None = None):
+    """Write one hand edit at time `at` (default now). value None clears it, and the clear is remembered in `cleared`
+    so undoing something travels in backups like any other edit."""
+    kcol, vcol = EDITS[table]
+    at = at or datetime.now().isoformat(timespec="seconds")
+    if value is None:
+        con.execute(f"DELETE FROM {table} WHERE {kcol}=?", (key,))
+        con.execute("INSERT INTO cleared VALUES (?,?,?) ON CONFLICT(tbl, key) DO UPDATE SET updated_at=excluded.updated_at", (table, key, at))
+        return
+    cols, args = [kcol] + ([vcol] if vcol else []), [key] + ([value] if vcol else [])
+    if table != "budgets":
+        cols.append("created_at"); args.append(at[:10])
+    cols.append("updated_at"); args.append(at)
+    upd = ", ".join(f"{c}=excluded.{c}" for c in ([vcol] if vcol else []) + ["updated_at"])
+    con.execute(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) ON CONFLICT({kcol}) DO UPDATE SET {upd}", args)
+    con.execute("DELETE FROM cleared WHERE tbl=? AND key=?", (table, key))
+
+
+def _edit_state(con, db: str, table: str, has_cleared: bool) -> dict:
+    """key → (when, value or None for cleared) for one edit table in `db` ('main' or an attached backup).
+    Rows from before updated_at existed fall back to created_at, then to '' (older than any real edit)."""
+    kcol, vcol = EDITS[table]
+    cols = {r[1] for r in con.execute(f"PRAGMA {db}.table_info({table})")}
+    have = [c for c in ("updated_at", "created_at") if c in cols]
+    when = f"COALESCE({', '.join(have)}, '')" if have else "''"
+    out = {r[0]: (r[1], r[2]) for r in con.execute(f"SELECT {kcol}, {when}, {vcol or 1} FROM {db}.{table}")}
+    if has_cleared:
+        for k, at in con.execute(f"SELECT key, updated_at FROM {db}.cleared WHERE tbl=?", (table,)):
+            if k not in out or at > out[k][0]:
+                out[k] = (at, None)
+    return out
+
+
+def merge(con, other_path: str) -> dict:
+    """Fold another machine's ledger (a backup) into this one; nothing here is ever lost.
+    Data rows (accounts, transactions, statements, imports) are added when missing: ids are content hashes, so the same
+    charge has the same id on every machine. Hand edits go newest-wins per key, clears included."""
+    con.commit()
+    con.execute("ATTACH DATABASE ? AS b", (other_path,))
+    try:
+        theirs_tables = {r[0] for r in con.execute("SELECT name FROM b.sqlite_master WHERE type='table'")}
+        out = {}
+        for t in ("accounts", "transactions", "statements", "imports"):
+            if t in theirs_tables:
+                before = con.total_changes
+                con.execute(f"INSERT OR IGNORE INTO main.{t} SELECT * FROM b.{t}")
+                out[t] = con.total_changes - before
+        edits = 0
+        for t in EDITS:
+            if t not in theirs_tables:
+                continue
+            mine = _edit_state(con, "main", t, True)
+            for key, (at, val) in _edit_state(con, "b", t, "cleared" in theirs_tables).items():
+                if key not in mine or at > mine[key][0]:
+                    _set_edit(con, t, key, val, at)
+                    edits += val is not None or key in mine
+        out["edits"] = edits
+        con.commit()
+    finally:
+        if con.in_transaction:
+            con.rollback()                                             # a failed merge must not leave b locked
+        con.execute("DETACH DATABASE b")
+    tidy(con)
+    return out
 
 
 def short(bank: str) -> str:
@@ -126,10 +202,7 @@ def budgets(con) -> dict:
 
 
 def set_budget(con, category: str, amount: float | None):
-    if amount is None or amount <= 0:
-        con.execute("DELETE FROM budgets WHERE category=?", (category,))
-    else:
-        con.execute("INSERT INTO budgets VALUES (?,?) ON CONFLICT(category) DO UPDATE SET amount=excluded.amount", (category, float(amount)))
+    _set_edit(con, "budgets", category, None if amount is None or amount <= 0 else float(amount))
     con.commit()
 
 
@@ -144,20 +217,12 @@ def merchant_cats(con) -> dict:
 
 
 def set_override(con, tx_id: str, category: str | None):
-    if category is None:
-        con.execute("DELETE FROM overrides WHERE tx_id=?", (tx_id,))
-    else:
-        con.execute("INSERT INTO overrides VALUES (?,?,?) ON CONFLICT(tx_id) DO UPDATE SET category=excluded.category",
-                    (tx_id, category, date.today().isoformat()))
+    _set_edit(con, "overrides", tx_id, category)
     con.commit()
 
 
 def set_merchant_cat(con, merchant: str, category: str | None):
-    if category is None:
-        con.execute("DELETE FROM merchant_cats WHERE merchant=?", (merchant,))
-    else:
-        con.execute("INSERT INTO merchant_cats VALUES (?,?,?) ON CONFLICT(merchant) DO UPDATE SET category=excluded.category",
-                    (merchant, category, date.today().isoformat()))
+    _set_edit(con, "merchant_cats", merchant, category)
     con.commit()
 
 
@@ -169,18 +234,12 @@ def names(con) -> tuple[dict, dict]:
 
 
 def set_name(con, tx_id: str, name: str | None):
-    if not name:
-        con.execute("DELETE FROM renames WHERE tx_id=?", (tx_id,))
-    else:
-        con.execute("INSERT INTO renames VALUES (?,?,?) ON CONFLICT(tx_id) DO UPDATE SET name=excluded.name", (tx_id, name, date.today().isoformat()))
+    _set_edit(con, "renames", tx_id, name or None)
     con.commit()
 
 
 def set_merchant_name(con, merchant: str, name: str | None):
-    if not name:
-        con.execute("DELETE FROM merchant_names WHERE merchant=?", (merchant,))
-    else:
-        con.execute("INSERT INTO merchant_names VALUES (?,?,?) ON CONFLICT(merchant) DO UPDATE SET name=excluded.name", (merchant, name, date.today().isoformat()))
+    _set_edit(con, "merchant_names", merchant, name or None)
     con.commit()
 
 
@@ -190,10 +249,7 @@ def dupes(con) -> set:
 
 
 def set_dupe(con, tx_id: str, on: bool):
-    if on:
-        con.execute("INSERT OR IGNORE INTO dupes VALUES (?,?)", (tx_id, date.today().isoformat()))
-    else:
-        con.execute("DELETE FROM dupes WHERE tx_id=?", (tx_id,))
+    _set_edit(con, "dupes", tx_id, True if on else None)
     con.commit()
 
 
