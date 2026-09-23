@@ -24,7 +24,7 @@ def collect(con, cl):
         tx.append({"id": r["id"], "date": r["date"], "acct": r["account_id"], "card": ledger.account_label(r["institution"], r["last_four"]),
                    "merchant": by_row.get(r["id"]) or by_merch.get(mkey) or r["description"], "orig": r["description"], "renamed": renamed,
                    "amount": round(r["amount"], 2), "cat": cat, "type": r["type"], "ignore": ignore or is_dupe, "dupe": is_dupe,
-                   "status": r["status"], "mkey": mkey, "pinned": pinned})
+                   "status": r["status"], "mkey": mkey, "pinned": pinned, "auto": cl.auto(r)})
     accounts = [{"id": r["id"], "name": r["name"]} for r in con.execute("SELECT id, name FROM accounts ORDER BY name")]
     return tx, accounts
 

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS renames (tx_id TEXT PRIMARY KEY, name TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS merchant_names (merchant TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT);
 CREATE TABLE IF NOT EXISTS dupes (tx_id TEXT PRIMARY KEY, created_at TEXT);
 CREATE TABLE IF NOT EXISTS cleared (tbl TEXT NOT NULL, key TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (tbl, key));
+CREATE TABLE IF NOT EXISTS merchant_model (merchant TEXT PRIMARY KEY, category TEXT, score REAL, model TEXT, tried_at TEXT);
 CREATE INDEX IF NOT EXISTS tx_date ON transactions(date);
 """
 
@@ -224,6 +225,12 @@ def set_override(con, tx_id: str, category: str | None):
 def set_merchant_cat(con, merchant: str, category: str | None):
     _set_edit(con, "merchant_cats", merchant, category)
     con.commit()
+
+
+def merchant_model(con) -> dict:
+    """report.merchant_key → category decided by the local classifier (classify.py). Below every hand edit and rule;
+    a cache each machine rebuilds, so backups don't merge it."""
+    return {r["merchant"]: r["category"] for r in con.execute("SELECT merchant, category FROM merchant_model WHERE category IS NOT NULL")}
 
 
 def names(con) -> tuple[dict, dict]:

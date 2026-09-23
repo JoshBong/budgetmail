@@ -8,6 +8,7 @@
   python3 budgetmail.py backup --mail     email that zip to yourself (the service also does this weekly)
   python3 budgetmail.py restore <zip>     merge a backup into this machine's ledger (adds history + newer edits, never deletes)
   python3 budgetmail.py restore --from-mail   same, merging every recent backup email in your Gmail
+  python3 budgetmail.py classify    run the local merchant classifier now over everything still in Other (--dry to preview)
   python3 budgetmail.py serve       run forever: sync every N minutes + dashboard on :PORT
   python3 budgetmail.py install     register `serve` as a system service (systemd / launchd) and start it
   python3 budgetmail.py uninstall
@@ -15,7 +16,7 @@
   python3 budgetmail.py status      service state, last sync, ledger totals, URL
   python3 budgetmail.py doctor      check python, config, Gmail login, database, service, port
   python3 budgetmail.py config      show config (password masked)
-  python3 budgetmail.py config set port 8090 | sync_interval_min 30 | default_checking.Chase 1234
+  python3 budgetmail.py config set port 8090 | sync_interval_min 30 | default_checking.Chase 1234 | classifier.model qwen2.5:3b
   python3 budgetmail.py config gmail        re-enter Gmail login (tested)
   python3 budgetmail.py update      git pull, run tests, restart the service
 
@@ -37,6 +38,7 @@ from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import classify
 import config
 import ledger
 import mail
@@ -89,6 +91,12 @@ def sync(con, cfg: dict, full: bool = False) -> dict:
                 if (counts["txn"] + counts["statement"]) % 50 == 0:
                     con.commit()                                       # short transactions: a full sync must not lock the DB for minutes
     ledger.tidy(con)
+    try:
+        r = classify.run(con, cfg)                                 # merchants still in Other → the local model, once each
+        if r.get("classified") or r.get("abstained"):
+            counts["classified"], counts["abstained"] = r["classified"], r["abstained"]
+    except Exception as ex:
+        print("classifier failed:", ex, flush=True)                # never let the model take the sync down
     ledger.set_meta(con, "last_sync", datetime.now().isoformat(timespec="seconds"))
     ledger.set_meta(con, "last_counts", json.dumps(counts))
     con.commit()
@@ -679,6 +687,9 @@ def doctor():
     except Exception as ex:
         good &= ok(False, f"database: {ex}")
     good &= ok((HERE / "rules.toml").exists(), "rules.toml (categories)")
+    cs = classify.settings(cfg)
+    print(("  ✓ " if classify.available(cfg) else "  – ") + (f"local merchant classifier ({cs['model']} via Ollama)" if classify.available(cfg)
+          else f"local merchant classifier off — optional: install Ollama, then  ollama pull {cs['model']}"))
     st = _service_state(); good &= ok("running" in st or "active" == st.split()[-1], st)
     good &= ok(_port_open(cfg["port"]), f"port {cfg['port']} listening")
     print("all good" if good else "fix the ✗ lines above")
@@ -700,8 +711,11 @@ def show_config(argv):
             cfg.setdefault("default_checking", {})[key.split(".", 1)[1]] = val
         elif key in ("port", "sync_interval_min"):
             cfg[key] = int(val)
+        elif key.startswith("classifier.") and key.split(".", 1)[1] in classify.DEFAULTS:
+            sub = key.split(".", 1)[1]
+            cfg.setdefault("classifier", {})[sub] = (val.lower() in ("1", "true", "yes", "on")) if sub == "enabled" else val
         else:
-            raise SystemExit(f"unknown key {key}. settable: port, sync_interval_min, default_checking.<Bank>")
+            raise SystemExit(f"unknown key {key}. settable: port, sync_interval_min, default_checking.<Bank>, classifier.enabled|model|url")
         config.save(cfg); print(f"{key} = {val}")
     else:
         raise SystemExit("usage: config | config gmail | config set <key> <value>")
@@ -774,7 +788,8 @@ def uninstall():
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["setup", "sync", "serve", "install", "uninstall", "start", "stop", "status", "doctor", "config", "update", "import", "backup", "restore"])
+    ap.add_argument("cmd", choices=["setup", "sync", "serve", "install", "uninstall", "start", "stop", "status", "doctor", "config", "update", "import", "backup", "restore", "classify"])
+    ap.add_argument("--dry", action="store_true", help="classify: show verdicts without writing them")
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--account", help="account id for import when it can't be detected")
     ap.add_argument("--force", action="store_true", help="import: re-read a file already imported (rows still dedupe)")
@@ -790,6 +805,15 @@ if __name__ == "__main__":
         print(c, "" if not c["unparsed"] else f"→ {config.FAILURES}")
     elif a.cmd == "serve":
         serve(config.load())
+    elif a.cmd == "classify":
+        cfg = config.load()
+        if not classify.available(cfg):
+            s = classify.settings(cfg)
+            raise SystemExit(f"no Ollama with {s['model']} at {s['url']}: install Ollama (https://ollama.com/download), then: ollama pull {s['model']}")
+        r = classify.run(ledger.connect(str(config.DB)), cfg, dry=a.dry)
+        for k, desc, cat, score in sorted(r.get("decided", []), key=lambda d: -d[3]):
+            print(f"{score:.2f}  {cat or '—':22s} {desc[:50]}")
+        print({k: v for k, v in r.items() if k != "decided"}, "(dry run, nothing written)" if a.dry else "")
     elif a.cmd == "install":
         install()
     elif a.cmd == "uninstall":

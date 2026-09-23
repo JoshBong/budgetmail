@@ -28,6 +28,13 @@ rail of categories that slides up while you drag (long-press to start on a phone
 charge or every charge from that merchant; "every" is remembered, so future ones land right too. Undo is in the toast.
 Rules you set this way outrank `rules.toml`, and they ride along in your backup.
 
+**Still a lot in Other?** Run [Ollama](https://ollama.com/download) on the box and `ollama pull qwen2.5:3b` (the
+installer offers it). After each sync, every merchant that nothing else could place is decided once by that small local
+model — no API, no key, nothing leaves the machine. The category list in the prompt is whatever your categories are,
+with the hints in `categories.py`; when the model says it can't tell, the merchant stays Other and is retried in a
+month. Your drags, `rules.toml` and the bank's own category all outrank it. `./budgetmail classify --dry` previews what
+it would decide; `config set classifier.model <name>` picks another Ollama model.
+
 ## Setup
 
 Runs anywhere with Python 3.11+ — a Raspberry Pi, an old laptop, a Mac, a $4 VPS. One machine runs it; phones and laptops

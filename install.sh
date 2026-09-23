@@ -19,3 +19,11 @@ else
   echo "registering the systemd service (needs sudo once)…"
   sudo -E "$PY" budgetmail.py install
 fi
+echo
+if ! curl -s localhost:11434/api/tags >/dev/null 2>&1; then
+  echo "optional: the local merchant classifier needs Ollama (https://ollama.com/download) — after installing it:"
+  echo "  ollama pull qwen2.5:3b && ./budgetmail classify"
+elif ! curl -s localhost:11434/api/tags | grep -q '"qwen2.5:3b"'; then
+  read -r -p "pull the merchant-classifier model (qwen2.5:3b, ~2 GB, runs on this box, nothing leaves it)? [y/N] " yn
+  if [ "${yn:-n}" = "y" ] || [ "${yn:-n}" = "Y" ]; then ollama pull qwen2.5:3b && "$PY" budgetmail.py classify || true; fi
+fi

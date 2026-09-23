@@ -32,6 +32,7 @@ class Classifier:
          2. merchant rule you taught it — you dragged one and said "all from this merchant"
          3. rules.toml                  — the shipped merchant regexes
          4. the bank's own category     — mapped through categories.normalize
+         5. the local classifier's verdict for the merchant (classify.py) — only where 4 gives Other
     A category you set by hand (1 or 2) is "pinned": it always counts as spend, even if a rule or the
     transfer heuristic had written the row off."""
 
@@ -40,6 +41,7 @@ class Classifier:
         self.over = ledger.overrides(con) if con is not None else {}
         self.merch = ledger.merchant_cats(con) if con is not None else {}
         self.dupes = ledger.dupes(con) if con is not None else set()
+        self.model = ledger.merchant_model(con) if con is not None else {}
 
     def of(self, row):
         """→ (category, ignore, pinned)"""
@@ -53,7 +55,16 @@ class Classifier:
         for r in self.rules:
             if r["_re"].search(row["description"] or "") or r["_re"].search(row["counterparty"] or ""):
                 return categories.normalize(r.get("category") or row["category"]), bool(r.get("ignore")), False
-        return categories.normalize(row["category"]), (row["type"] in SKIP_TYPES), False
+        cat = categories.normalize(row["category"])
+        if cat == categories.OTHER:
+            cat = self.model.get(merchant_key(row), categories.OTHER)
+        return cat, (row["type"] in SKIP_TYPES), False
+
+    def auto(self, row) -> bool:
+        """True when the category came from the classifier rather than you, a rule or the bank."""
+        return (not self.over.get(row["id"]) and not self.merch.get(merchant_key(row)) and merchant_key(row) in self.model
+                and categories.normalize(row["category"]) == categories.OTHER
+                and not any(r["_re"].search(row["description"] or "") or r["_re"].search(row["counterparty"] or "") for r in self.rules))
 
 
 def spend_rows(con, cl: "Classifier", month=None):
