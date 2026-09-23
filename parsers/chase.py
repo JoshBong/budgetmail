@@ -12,6 +12,7 @@ class Chase(BankParser):
         (r"credit card statement is available", "statement"),
         (r"transaction with|debit card transaction of", "purchase"),
         (r"refund|credit (?:was )?posted", "refund"),
+        (r"^You sent \$[\d,.]+ from account ending in", "transfer_out"),   # "Transfer alert": you moved money, e.g. paid your own card
         (r"received money with Zelle", "zelle_in"),
         (r"sent money with Zelle|^You sent", "zelle_out"),
         (r"daily account summary", "skip"),          # TODO: parse posted transactions once a real one is seen
@@ -38,6 +39,11 @@ class Chase(BankParser):
         amt = self.amount(e.subject) or self.amount(e.body, "Amount")
         merchant = self.field(e.body, "Merchant") or "refund"
         return Parsed("refund", amt, merchant, self.last4(e.body, e.subject), self.date(e.body, e.received)) if amt else None
+
+    def transfer_out(self, e: Email):
+        amt = self.amount(e.subject) or self.amount(e.body, "Amount")
+        who = self.field(e.body, "Recipient") or self.field(e.body, "to") or "?"
+        return Parsed("transfer_out", amt, "Transfer to " + who, self.last4(e.body, e.subject), self.date(e.body, e.received, "Sent on")) if amt else None
 
     def zelle_in(self, e: Email):
         amt = self.amount(e.body, "Amount")

@@ -266,7 +266,7 @@ def record_statement(con, account_id_: str, p: Parsed):
     upsert_statement(con, account_id_, p.date.isoformat(), p.balance, p.due.isoformat() if p.due else None, authoritative=True)
 
 
-TRANSFERISH = ("transfer", "trnsfr", "payment", "autopay", "deposit", "withdrawal", "cashout", "ext trnsfr")
+TRANSFERISH = ("transfer", "trnsfr", "payment", "autopay", "deposit", "withdrawal", "cashout", "ext trnsfr", "credit crd")
 
 
 def drop_shadowed_pending(con) -> int:
@@ -281,21 +281,25 @@ def drop_shadowed_pending(con) -> int:
 
 def tidy(con) -> dict:
     """The two dedupe rules that matter, run after every sync/import. Idempotent.
-    1. A row that names another account we track (its last-4) and looks like a transfer/payment → type=transfer.
+    1. A row that names another account we track (its last-4, or the bank itself: "CHASE CREDIT CRD") and looks like a
+       transfer/payment → type=transfer. Paying your own card is moving money, not spend — the charges were already counted.
     2. Money in on one account + the same amount out on a different account within 3 days, either side transfer-looking
        → both type=transfer.  Transfers are excluded from spend and income."""
     last4s = [r["last_four"] for r in con.execute("SELECT last_four FROM accounts WHERE last_four IS NOT NULL")]
+    banks = set()                                     # names of the institutions you track: "chase", "bank of america", "bofa"
+    for r in con.execute("SELECT DISTINCT institution FROM accounts WHERE institution!='Venmo'"):
+        banks.update({r["institution"].lower(), short(r["institution"]).lower()})
     n1 = n2 = 0
     for r in con.execute("SELECT id, description, account_id FROM transactions WHERE type!='transfer'").fetchall():
         d = (r["description"] or "").lower()
         if "venmo" in d and not r["account_id"].startswith("venmo"):          # bank ↔ Venmo money movement; spend is counted from Venmo's own emails
             con.execute("UPDATE transactions SET type='transfer' WHERE id=?", (r["id"],)); n1 += 1; continue
-        if any(k in d for k in TRANSFERISH) and any(l in d for l in last4s):
+        if any(k in d for k in TRANSFERISH) and (any(l in d for l in last4s) or any(b in d for b in banks)):
             con.execute("UPDATE transactions SET type='transfer' WHERE id=?", (r["id"],)); n1 += 1
     ins = con.execute("""SELECT id, account_id, date, amount, description FROM transactions
                          WHERE amount>0 AND type!='transfer' AND status='posted'""").fetchall()
     for a in ins:
-        b = con.execute("""SELECT id, description FROM transactions WHERE account_id!=? AND ABS(amount+?)<0.005 AND type!='transfer'
+        b = con.execute("""SELECT id, description FROM transactions WHERE account_id!=? AND ABS(amount+?)<0.005
                            AND ABS(julianday(date)-julianday(?))<=3 ORDER BY ABS(julianday(date)-julianday(?)) LIMIT 1""",
                         (a["account_id"], a["amount"], a["date"], a["date"])).fetchone()
         if not b:

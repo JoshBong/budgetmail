@@ -41,6 +41,14 @@ class ChaseTests(unittest.TestCase):
         self.assertEqual((p.kind, p.amount, p.merchant, p.last4, p.date), ("zelle_in", 16.0, "Zelle from TYRONE THA", "0946", date(2026, 8, 29)))
         self.assertEqual(p.txn_type, "zelle")                                   # paybacks net against People, not hidden as income
 
+    def test_paying_your_own_card_is_a_transfer_not_zelle(self):
+        # Chase "Transfer alert" (first seen 2026-09-21): checking → credit card. The charges were already counted on the card.
+        p = parse("You sent $663.16 from account ending in (...0946)", CHASE,
+                  "Transfer alert You sent $663.16 to CHASE CREDIT CRD Account ending in (...0946) Sent on Sep 21, 2026 at 1:43 AM ET "
+                  "Recipient CHASE CREDIT CRD Amount $663.16 You are receiving this alert because this transaction is more than the $0.00 limit you set.")
+        self.assertEqual((p.kind, p.amount, p.merchant, p.last4, p.date), ("transfer_out", 663.16, "Transfer to CHASE CREDIT CRD", "0946", date(2026, 9, 21)))
+        self.assertEqual((p.signed_amount, p.txn_type), (-663.16, "transfer"))
+
     def test_noise_is_skipped_not_failed(self):
         for s in ("We've received your Chase Sapphire Preferred Visa payment", "Your latest statement is now available",
                   "You edited SheetLink's data access", "We're reviewing your transfer", "You received a new letter"):
@@ -259,13 +267,13 @@ class TidyTests(unittest.TestCase):
 
     def test_named_card_payment_and_paired_transfer(self):
         self.row("bankofamerica_1933", "2026-05-22", -2618.37, "Online Scheduled Payment to ACCT# 4139")   # names a tracked account
-        self.row("bankofamerica_1933", "2026-05-27", -2500.00, "JPMorgan Chase DES:Ext Trnsfr")            # no last4, but…
-        self.row("chase_0946", "2026-05-29", 2500.00, "Online Transfer From Adv Safebalance Banking")       # …pairs with this
+        self.row("bankofamerica_1933", "2026-05-27", -2500.00, "JPMorgan Chase DES:Ext Trnsfr")            # names a tracked bank
+        self.row("chase_0946", "2026-05-29", 2500.00, "Online Transfer From Adv Safebalance Banking")       # the other side, found by pairing
         self.row("chase_0946", "2026-05-29", -45.73, "SQ *RAMEN ISHIDA")                                    # untouched
         self.row("bankofamerica_1933", "2026-05-30", 50.00, "Zelle from A FRIEND")                          # income, not paired
         self.row("chase_0946", "2026-05-30", -50.00, "SOME STORE")                                          # same amount but not transfer-looking
         r = self.ledger.tidy(self.con)
-        self.assertEqual(r, {"named_transfers": 1, "paired_transfers": 1, "shadowed_pending": 0})
+        self.assertEqual(r, {"named_transfers": 2, "paired_transfers": 1, "shadowed_pending": 0})
         types = {row["description"]: row["type"] for row in self.con.execute("SELECT description, type FROM transactions")}
         self.assertEqual(types["Online Scheduled Payment to ACCT# 4139"], "transfer")
         self.assertEqual(types["JPMorgan Chase DES:Ext Trnsfr"], "transfer")
@@ -273,6 +281,17 @@ class TidyTests(unittest.TestCase):
         self.assertEqual(types["SQ *RAMEN ISHIDA"], "card_payment")
         self.assertEqual(types["SOME STORE"], "card_payment")
         self.assertEqual(self.ledger.tidy(self.con), {"named_transfers": 0, "paired_transfers": 0, "shadowed_pending": 0})     # idempotent
+
+    def test_money_sent_to_your_own_bank_is_a_transfer(self):
+        import report
+        self.row("chase_0946", "2026-09-21", -663.16, "Zelle to CHASE CREDIT CRD", status="pending")   # how the old parser recorded a card payment
+        self.row("chase_0946", "2026-09-20", -120.00, "CHASE CENTER SAN FRANCISCO")                    # a purchase that merely contains the bank's name
+        self.con.execute("UPDATE transactions SET type='zelle' WHERE description LIKE 'Zelle%'")
+        self.assertEqual(self.ledger.tidy(self.con)["named_transfers"], 1)
+        types = {row["description"]: row["type"] for row in self.con.execute("SELECT description, type FROM transactions")}
+        self.assertEqual(types["Zelle to CHASE CREDIT CRD"], "transfer")
+        self.assertEqual(types["CHASE CENTER SAN FRANCISCO"], "card_payment")
+        self.assertEqual([r["description"] for r, _ in report.spend_rows(self.con, report.Classifier(self.con))], ["CHASE CENTER SAN FRANCISCO"])
 
     def test_alert_after_posted_row_is_not_added(self):
         from parsers import Parsed

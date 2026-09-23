@@ -30,7 +30,7 @@ class Email:
 
 @dataclass
 class Parsed:
-    kind: str                    # purchase | refund | zelle_out | zelle_in | deposit | statement | skip
+    kind: str                    # purchase | refund | zelle_out | zelle_in | transfer_out | deposit | statement | skip
     amount: float = 0.0          # positive number; sign is applied by kind
     merchant: str = ""
     last4: str | None = None
@@ -41,7 +41,7 @@ class Parsed:
     posted: bool = False           # True for CSV rows (bank's posted data), False for alert emails (authorization-time)
     extra: dict = field(default_factory=dict)
 
-    SPEND = {"purchase", "zelle_out"}
+    SPEND = {"purchase", "zelle_out", "transfer_out"}
     INCOME = {"refund", "zelle_in", "deposit"}
 
     @property
@@ -51,7 +51,7 @@ class Parsed:
     @property
     def txn_type(self) -> str:      # feeds reports: transfers are excluded from spend; zelle_in nets against People
         return {"purchase": "card_payment", "refund": "card_payment", "zelle_out": "zelle",
-                "zelle_in": "zelle", "deposit": "transfer"}.get(self.kind, self.kind)
+                "zelle_in": "zelle", "deposit": "transfer", "transfer_out": "transfer"}.get(self.kind, self.kind)
 
 
 _REGISTRY: dict[str, "BankParser"] = {}

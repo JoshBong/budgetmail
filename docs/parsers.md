@@ -63,6 +63,7 @@ and tables removed, `received` date) and returns a `Parsed`:
 | `refund` | merchant credit | negative spend, same category |
 | `zelle_out` | you paid a person (Zelle, Venmo, Apple Cash…) | spend, People |
 | `zelle_in` | a person paid you | nets against People |
+| `transfer_out` | you moved money to another account of yours (paid your card, funded savings) | nothing — the charges were already counted |
 | `deposit` | paycheck, check, wire, other income | income, excluded from the budget |
 | `statement` | statement closed | checksum only (needs `balance`, `date`) |
 | `skip` | known noise | nothing |
@@ -130,8 +131,11 @@ bank prints it differently.
 ## 5. Transfers between your own accounts
 Skip them in the parser where the wording is bank-specific (`Online Banking transfer`, `Payment to Chase card`,
 `DES:Ext Trnsfr`) — put the patterns in a class-level `OWN_ACCOUNT` regex like `bofa.py`. `ledger.tidy()` is the safety
-net after that: any row that names another tracked account's last-4, or that pairs with the same amount in another
-account within 3 days, becomes a transfer and counts for nothing.
+net after that: any row that names another tracked account's last-4 or a bank you have an account with (`CHASE CREDIT
+CRD`), or that pairs with the same amount in another account within 3 days, becomes a transfer and counts for nothing.
+Alert emails that announce a transfer (Chase "Transfer alert": `You sent $X from account ending in …`) parse to
+`transfer_out` so they never look like a Zelle payment. A transfer stays out of spend even when a rules.toml pattern
+matches its text; only a hand-set category (drag) can pull it back in.
 
 ## 6. Tests, then a PR
 `tests/test_parsers.py` — copy a real body per email shape, a CSV snippet per layout, a chunk of `pdftotext` output

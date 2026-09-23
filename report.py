@@ -48,6 +48,8 @@ class Classifier:
         manual = self.over.get(row["id"]) or self.merch.get(merchant_key(row))
         if manual:
             return categories.normalize(manual), False, True
+        if row["type"] in SKIP_TYPES:                        # money between your own accounts: no merchant rule can make it spend
+            return categories.normalize(row["category"]), True, False
         for r in self.rules:
             if r["_re"].search(row["description"] or "") or r["_re"].search(row["counterparty"] or ""):
                 return categories.normalize(r.get("category") or row["category"]), bool(r.get("ignore")), False
