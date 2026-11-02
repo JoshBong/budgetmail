@@ -43,6 +43,7 @@ import config
 import ledger
 import mail
 import parsers
+import todos
 
 HERE = Path(__file__).resolve().parent
 SERVICE = "budgetmail"
@@ -65,7 +66,7 @@ def publish(event: dict):
 def sync(con, cfg: dict, full: bool = False) -> dict:
     parsers.configure(cfg.get("default_checking", {}))
     since = None if full else date.today() - timedelta(days=14)
-    counts = {"txn": 0, "statement": 0, "skip": 0, "unparsed": 0, "unknown_sender": 0}
+    counts = {"txn": 0, "statement": 0, "todo": 0, "skip": 0, "unparsed": 0, "unknown_sender": 0}
     new_txns = 0
     config.ensure_home()
     if full and config.FAILURES.exists():
@@ -82,6 +83,11 @@ def sync(con, cfg: dict, full: bool = False) -> dict:
                 failures.write(json.dumps({"bank": bank.name, "subject": e.subject, "date": e.received.isoformat(), "body": e.body[:1500]}) + "\n")
             elif p.kind == "skip":
                 counts["skip"] += 1
+            elif p.kind == "request":
+                if todos.from_request(con, p.merchant, p.amount, p.extra.get("note", ""), p.date, p.extra.get("reminder", False)) == "new":
+                    counts["todo"] += 1; new_txns += 1
+            elif p.kind == "request_canceled":
+                todos.canceled(con, p.merchant, p.amount, p.date)
             else:
                 k = ledger.record(con, bank.name, p, e.subject)
                 if k == "txn_new":
@@ -91,6 +97,7 @@ def sync(con, cfg: dict, full: bool = False) -> dict:
                 if (counts["txn"] + counts["statement"]) % 50 == 0:
                     con.commit()                                       # short transactions: a full sync must not lock the DB for minutes
     ledger.tidy(con)
+    todos.reconcile(con)                                           # requests you've since paid check themselves off
     try:
         r = classify.run(con, cfg)                                 # merchants still in Other → the local model, once each
         if r.get("classified") or r.get("abstained"):
@@ -462,6 +469,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(json.dumps({"error": "no such transaction"}).encode(), "application/json", 404); return
                 ledger.set_dupe(self.con, body["id"], bool(body.get("dupe", True)))
             self._send(json.dumps({"id": body["id"], "dupe": bool(body.get("dupe", True))}).encode(), "application/json")
+        elif self.path == "/api/todo":
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            act = body.get("action")
+            with self.lock:
+                try:
+                    if act == "add" and (body.get("text") or "").strip():
+                        todos.add(self.con, body["text"]); todos.reconcile(self.con)
+                    elif act in ("open", "done", "dismissed"):
+                        todos.set_status(self.con, body.get("id"), act)
+                    elif act == "move":
+                        todos.move(self.con, body.get("id"), body.get("before"))
+                    else:
+                        self._send(json.dumps({"error": "action must be add|open|done|dismissed|move"}).encode(), "application/json", 400); return
+                except KeyError as ex:
+                    self._send(json.dumps({"error": ex.args[0]}).encode(), "application/json", 404); return
+                self._send(json.dumps(todos.listing(self.con)).encode(), "application/json")
         elif self.path == "/api/sync":
             with self.lock:
                 try:

@@ -6,6 +6,7 @@ import categories
 import config
 import ledger
 import report
+import todos
 
 
 def short(inst):
@@ -76,7 +77,7 @@ def data(con) -> dict:
     cl = report.Classifier(con)
     tx, accounts = collect(con, cl)
     return {"tx": tx, "accounts": accounts, "categories": categories.CATEGORIES, "recurring": recurring(con, cl), "checksum": checksum(con),
-            "budgets": ledger.budgets(con), "failures": failures(), "last_sync": ledger.get_meta(con, "last_sync"), "last_counts": json.loads(ledger.get_meta(con, "last_counts", "{}"))}
+            "budgets": ledger.budgets(con), "todos": todos.listing(con), "failures": failures(), "last_sync": ledger.get_meta(con, "last_sync"), "last_counts": json.loads(ledger.get_meta(con, "last_counts", "{}"))}
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ class Venmo(BankParser):
         (r"^You paid (.+?) \$", "paid"),
         (r"^You completed .+ charge request", "paid"),
         (r"^(.+?) paid (?:your? )?\$|^You received \$", "received"),      # "paid you $", "paid your $X request", "paid $X to your Venmo account"
+        (r"^(?:Reminder: )?.+? requests \$", "request"),                   # someone asking you for money → a to-do
+        (r"^.+? canceled a request for \$", "request_canceled"),
         (r"transfer has been initiated|transfer .* complete|added money|Instant transfer", "skip"),   # moving your own money
         (r"requests? \$|Reminder:|wants to be friends|transaction history|verify|welcome|security|password|sign-in|"
          r"payment method|profile|account|statement|changes to|commented on|declined|cancel|is now your friend|coming soon|paypal|invited you|expense activity|group", "skip"),
@@ -30,6 +32,24 @@ class Venmo(BankParser):
         who = (m.group(1) if m else "?").strip()
         amt = self.amount(e.subject) or self._spaced_amount(e.body)
         return Parsed("zelle_in", amt, "Venmo from " + who, None, self.date(e.body, e.received, "Date"), posted=True, extra={"ref": self._ref(e.body)}) if amt else None
+
+    def request(self, e: Email):
+        m = re.match(r"(?:Reminder: )?(.+?) requests \$([\d,]+\.\d{2})(?:\s*-\s*(.+))?$", e.subject)
+        if not m:
+            return None
+        note = (m.group(3) or self._request_note(e.body, m.group(1))).strip()
+        return Parsed("request", float(m.group(2).replace(",", "")), m.group(1).strip(), None, e.received,
+                      extra={"note": note[:60], "reminder": e.subject.startswith("Reminder:")})
+
+    def request_canceled(self, e: Email):
+        m = re.match(r"(.+?) canceled a request for \$([\d,]+\.\d{2})", e.subject)
+        return Parsed("request_canceled", float(m.group(2).replace(",", "")), m.group(1).strip(), None, e.received) if m else None
+
+    @staticmethod
+    def _request_note(body, who):    # "Shiyuan Chen requests $ 33. 00 Carrier See Request" — the note sits between amount and button
+        head = body.split("See Request", 1)[0]                              # headline is repeated; the note follows the LAST amount
+        ms = list(re.finditer(r"\$\s*[0-9,]+\s*\.\s*\d{2}", head))
+        return head[ms[-1].end():].strip() if ms else ""
 
     @staticmethod
     def _ref(body):                  # Venmo's own transaction id: the exact identity of a payment

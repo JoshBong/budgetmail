@@ -334,7 +334,7 @@ class VenmoTests(unittest.TestCase):
         self.assertEqual((p.kind, p.amount, p.merchant), ("zelle_in", 29.33, "Venmo from Sean Walker"))
 
     def test_noise(self):
-        for s in ("Your Venmo Standard transfer has been initiated", "Reminder: Iain Kimpton requests $10.00", "Iain Kimpton requests $10.00",
+        for s in ("Your Venmo Standard transfer has been initiated", 
                   "Jovian Wang wants to be friends with you on Venmo", "Your July 2026 transaction history", "Sign-in attempt from new device",
                   "Venmo Quarterly Statement", "Davide Farinacci commented on a payment between you and Riley",
                   "Coming soon, you can send money between Venmo and PayPal", "Bailey Eng is now your friend on Venmo"):

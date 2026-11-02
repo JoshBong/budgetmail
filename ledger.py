@@ -5,6 +5,7 @@ import sqlite3
 from datetime import date, datetime
 
 from parsers import Parsed
+import todos
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, institution TEXT, name TEXT, last_four TEXT);
@@ -29,7 +30,7 @@ CREATE INDEX IF NOT EXISTS tx_date ON transactions(date);
 def connect(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(path, check_same_thread=False, timeout=30)   # wait for a concurrent sync instead of "database is locked"
     con.row_factory = sqlite3.Row
-    con.executescript(SCHEMA)
+    con.executescript(SCHEMA + todos.SCHEMA)
     for t in EDITS:                                                     # hand edits carry updated_at so backups can merge newest-wins
         if "updated_at" not in {r[1] for r in con.execute(f"PRAGMA table_info({t})")}:
             con.execute(f"ALTER TABLE {t} ADD COLUMN updated_at TEXT")
@@ -99,6 +100,8 @@ def merge(con, other_path: str) -> dict:
                     _set_edit(con, t, key, val, at)
                     edits += val is not None or key in mine
         out["edits"] = edits
+        if "todos" in theirs_tables:
+            todos.merge(con)
         con.commit()
     finally:
         if con.in_transaction:

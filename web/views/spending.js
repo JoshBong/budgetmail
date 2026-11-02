@@ -7,6 +7,7 @@ import { Donut } from '../components/donut.js';
 import { CategoryCards } from '../components/categoryCards.js';
 import { TxList } from '../components/txList.js';
 import { SyncButton } from '../components/syncButton.js';
+import { TodoList, TodoAddPill } from '../components/todoList.js';
 import { recatOptions } from '../lib/recat.js';
 import { txActions } from '../lib/txActions.js';
 
@@ -62,12 +63,14 @@ export function SpendingView({ rerender, goto }) {
     MonthNav({ months: store.months, month, onChange: m => { store.state.month = m; store.state.expanded = null; store.state.detailQ = ''; rerender(); } }),
     el('div', { class: 'row', style: { justifyContent: 'center', marginBottom: '6px' } },
       Segmented({ options: [{ value: 'cat', label: 'by category' }, { value: 'acct', label: 'by account' }], value: mode, onChange: v => { store.state.mode = v; rerender(); } }),
-      SyncButton({ compact: true, onDone: () => store.load().then(() => rerender()) })),
+      SyncButton({ compact: true, onDone: () => store.load().then(() => rerender()) }),
+      TodoAddPill({ rerender })),
     Donut({ items: shaped.filter(i => i.value > 0), total, onSelect: toggle, selected: expanded,
       title: net < 0 ? '+' + money0(-net) : money0(net), titleClass: net < 0 ? 'down' : '',
       subtitle: monthLabel(month) }),
     CategoryCards({ items: shaped, total, hasPrev: !!prev, elapsed, onSelect: toggle, selected: expanded, droppable: byCat,
       editing: store.state.editing, onEdit: k => { store.state.editing = k; rerender(); }, onSaveBudget: saveBudget }),
     detail,
+    TodoList({ rerender }),
   );
 }

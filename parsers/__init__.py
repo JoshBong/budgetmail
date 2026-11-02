@@ -30,7 +30,7 @@ class Email:
 
 @dataclass
 class Parsed:
-    kind: str                    # purchase | refund | zelle_out | zelle_in | transfer_out | deposit | statement | skip
+    kind: str                    # purchase | refund | zelle_out | zelle_in | transfer_out | deposit | statement | request | request_canceled | skip
     amount: float = 0.0          # positive number; sign is applied by kind
     merchant: str = ""
     last4: str | None = None
